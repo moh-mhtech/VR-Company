@@ -76,7 +76,10 @@ def main() -> None:
 
     async def _run() -> int:
         client = RuntimeClient(args.host, args.port)
-        await client.connect()
+        try:
+            await client.connect()
+        except ConnectionError as exc:
+            raise SystemExit(str(exc)) from exc
         try:
             if args.message:
                 return await once(client, args.recipient, args.message)

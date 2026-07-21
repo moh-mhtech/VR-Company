@@ -19,16 +19,33 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = [
+  "pytest>=8.0",
+  "httpx>=0.27",
+]
+web = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "websockets>=14.0",
+  "httpx>=0.27",
+]
 
 [project.scripts]
 vr-runtime = "runtime.main:main"
+vr-autogen = "runtime.autogen_server:main"
 vr-board = "interfaces.board_cli:main"
 vr-client = "interfaces.client_cli:main"
+vr-web = "web.main:main"
 
 [tool.setuptools.packages.find]
-include = ["runtime*", "interfaces*", "company*"]
+include = ["runtime*", "interfaces*", "web*"]
+
+[tool.setuptools.package-data]
+web = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+  "live: tests that call a real model API (need OPENAI_API_KEY)",
+]

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VR-Company Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Sora:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="atmosphere" aria-hidden="true"></div>
+    <header class="topbar">
+      <div class="brand-block">
+        <p class="brand">VR-Company</p>
+        <p class="tagline">Live agent console</p>
+      </div>
+      <div class="status-block">
+        <div class="experiment-menu" id="experiment-menu">
+          <button type="button" class="ghost-btn" id="btn-experiments" aria-expanded="false" aria-haspopup="true">
+            Experiments
+          </button>
+          <span id="active-experiment" class="experiment-label" title="Active experiment">no experiment</span>
+          <div class="experiment-panel" id="experiment-panel" hidden>
+            <div class="experiment-panel-head">
+              <h3>Experiments</h3>
+              <button type="button" class="ghost-btn" id="btn-exp-refresh">Refresh</button>
+            </div>
+            <p id="experiment-empty" class="empty-hint" hidden>
+              No experiments yet. Create one from the seed to begin.
+            </p>
+            <ul id="experiment-list" class="experiment-list"></ul>
+            <form id="experiment-create-form" class="experiment-create">
+              <label class="field">
+                <span>New name</span>
+                <input id="exp-name" name="name" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,62}" placeholder="phase-0" />
+              </label>
+              <label class="field">
+                <span>Notes</span>
+                <input id="exp-notes" name="notes" placeholder="Optional purpose" />
+              </label>
+              <label class="check-field">
+                <input type="checkbox" id="exp-start" checked />
+                <span>Start after create</span>
+              </label>
+              <button type="submit" class="send-btn">Create</button>
+            </form>
+          </div>
+        </div>
+        <button type="button" class="ghost-btn" id="btn-restart-session">Restart session</button>
+        <span id="runtime-status" class="status-pill status-unknown">runtime …</span>
+        <span id="ws-status" class="status-pill status-unknown">feed …</span>
+      </div>
+    </header>
+
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <form method="dialog" id="confirm-form">
+        <h3 id="confirm-title">Confirm</h3>
+        <p id="confirm-body" class="confirm-body"></p>
+        <div class="confirm-actions">
+          <button type="submit" value="cancel" class="ghost-btn">Cancel</button>
+          <button type="submit" value="confirm" class="danger-btn" id="confirm-ok">Confirm</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="prompt-dialog" class="confirm-dialog">
+      <form method="dialog" id="prompt-form">
+        <h3 id="prompt-title">Input</h3>
+        <p id="prompt-body" class="confirm-body"></p>
+        <label class="field">
+          <span id="prompt-label">Value</span>
+          <input id="prompt-input" name="value" required />
+        </label>
+        <div class="confirm-actions">
+          <button type="submit" value="cancel" class="ghost-btn">Cancel</button>
+          <button type="submit" value="confirm" class="send-btn" id="prompt-ok">OK</button>
+        </div>
+      </form>
+    </dialog>
+
+    <main class="layout">
+      <section class="pane pane-agents" aria-labelledby="agents-heading">
+        <div class="pane-head">
+          <h2 id="agents-heading">Agents</h2>
+          <button type="button" class="ghost-btn" id="refresh-agents">Refresh</button>
+        </div>
+        <ul id="agent-list" class="agent-list"></ul>
+      </section>
+
+      <section class="pane pane-feed" aria-labelledby="feed-heading">
+        <div class="pane-head">
+          <h2 id="feed-heading">Live feed</h2>
+          <div class="filters">
+            <select id="filter-type" aria-label="Filter by event type">
+              <option value="all">All events</option>
+              <option value="message">Messages</option>
+              <option value="tool">Tools</option>
+              <option value="turn">Turns</option>
+              <option value="agent">Agents</option>
+            </select>
+            <input id="filter-agent" type="search" placeholder="Filter agent id" />
+          </div>
+        </div>
+        <div id="event-feed" class="event-feed" role="log" aria-live="polite"></div>
+      </section>
+
+      <section class="pane pane-comms" aria-labelledby="comms-heading">
+        <div class="pane-head">
+          <h2 id="comms-heading">Communications</h2>
+          <button type="button" class="ghost-btn" id="refresh-comms">Refresh</button>
+        </div>
+        <div class="comms-split">
+          <ul id="conversation-list" class="conversation-list"></ul>
+          <div id="thread" class="thread">
+            <p class="empty-hint">Select a conversation</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="pane pane-interact" aria-labelledby="interact-heading">
+        <div class="pane-head">
+          <h2 id="interact-heading">Interact</h2>
+          <div class="role-tabs" role="tablist">
+            <button type="button" class="role-tab active" data-role="board" role="tab" aria-selected="true">
+              Board
+            </button>
+            <button type="button" class="role-tab" data-role="client" role="tab" aria-selected="false">
+              Client
+            </button>
+          </div>
+        </div>
+        <form id="compose-form" class="compose">
+          <label class="field">
+            <span>Recipient</span>
+            <input id="recipient" name="recipient" value="ceo" autocomplete="off" />
+          </label>
+          <label class="field grow">
+            <span>Message</span>
+            <textarea id="content" name="content" rows="4" placeholder="Write as board or client…" required></textarea>
+          </label>
+          <div class="compose-actions">
+            <p id="compose-meta" class="compose-meta">Conversation: new</p>
+            <button type="submit" id="send-btn" class="send-btn">Send</button>
+          </div>
+          <pre id="compose-reply" class="compose-reply" hidden></pre>
+        </form>
+      </section>
+    </main>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

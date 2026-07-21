@@ -62,5 +62,11 @@ def patch_logging_for_windows() -> None:
 
 
 def harden_console() -> None:
+    # Avoid breaking pytest capture (wrapping closed tempfile streams).
+    import os
+
+    if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("VR_SKIP_HARDEN_CONSOLE"):
+        patch_logging_for_windows()
+        return
     configure_console_encoding()
     patch_logging_for_windows()

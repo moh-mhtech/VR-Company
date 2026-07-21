@@ -78,7 +78,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=port)
     parser.add_argument(
         "--recipient",
-        default="sales_001",
+        default="sales",
         help="Initial recipient agent id (use /to to change)",
     )
     parser.add_argument("--message", "-m", help="Send a single message and exit")
@@ -86,7 +86,10 @@ def main() -> None:
 
     async def _run() -> int:
         client = RuntimeClient(args.host, args.port)
-        await client.connect()
+        try:
+            await client.connect()
+        except ConnectionError as exc:
+            raise SystemExit(str(exc)) from exc
         try:
             if args.message:
                 return await once(client, args.recipient, args.message)

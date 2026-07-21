@@ -3,3 +3,8 @@ max_code_output_chars: 20000
 max_file_read_chars: 100000
 tcp_host: "127.0.0.1"
 tcp_port: 8765
+event_buffer_size: 500
+web_host: "127.0.0.1"
+web_port: 8787
+# Embedded UI starts with runtime.main; disable with --no-web
+web_hint: "python -m runtime.main"
