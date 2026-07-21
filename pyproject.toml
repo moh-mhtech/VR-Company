@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vr-company"
+version = "0.1.0"
+description = "Virtual Reality Company experiment — AutoGen agents operating a recursive virtual company"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+dependencies = [
+  "autogen-agentchat>=0.4.9",
+  "autogen-ext[openai]>=0.4.9",
+  "pyyaml>=6.0",
+  "python-dotenv>=1.0",
+  "agentops>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+vr-runtime = "runtime.main:main"
+vr-board = "interfaces.board_cli:main"
+vr-client = "interfaces.client_cli:main"
+
+[tool.setuptools.packages.find]
+include = ["runtime*", "interfaces*", "company*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

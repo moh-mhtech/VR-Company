@@ -1,0 +1,5 @@
+- Responded to client Mads in conversation conv_c8a0008045.
+- Confirmed ability to help build terminal prototype first, then online version.
+- Described core terminal game scope: 5 dice, destroy duplicates, score unique dice, continue until no dice left, high-score initials, restart.
+- Avoided exact token quote; offered next step for implementation plan and tighter estimate based on language/preferences.
+- No files changed.

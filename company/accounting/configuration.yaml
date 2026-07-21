@@ -1,0 +1,3 @@
+version: "1"
+default_activity: unallocated
+require_project_id: false

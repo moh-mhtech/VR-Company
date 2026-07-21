@@ -1,0 +1,25 @@
+agent_id: ceo
+display_name: Chief Executive Officer
+created_by: seed
+manager: board
+
+system_prompt_files:
+  - company/prompts/base-agent.md
+  - company/prompts/ceo.md
+
+initial_context_files:
+  - company/constitution.md
+  - company/organization.md
+  - company/communication.md
+
+private_directory: agents/ceo
+
+capabilities:
+  - filesystem
+  - code_execution
+  - messaging
+  - list_agents
+  - create_agent
+  - stop_agent
+  - read_usage
+  - modify_company

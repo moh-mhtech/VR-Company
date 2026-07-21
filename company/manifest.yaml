@@ -1,0 +1,21 @@
+revision: 1
+company_name: VR Company
+description: Seed virtual company operated by AutoGen agents.
+updated_at: "2026-07-21T00:00:00Z"
+recent_changes:
+  - path: company/manifest.yaml
+    note: Initial seed configuration
+  - path: company/constitution.md
+    note: Initial constitution
+  - path: company/organization.md
+    note: Initial organization
+  - path: company/communication.md
+    note: Initial communication norms
+  - path: company/access-control.yaml
+    note: Initial access control
+  - path: company/agents/ceo.yaml
+    note: Seed CEO agent
+  - path: company/prompts/base-agent.md
+    note: Mutable base-company prompt
+  - path: company/prompts/ceo.md
+    note: Mutable CEO prompt

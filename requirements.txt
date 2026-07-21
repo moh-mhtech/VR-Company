@@ -1,0 +1,7 @@
+# Runtime dependencies for the VR-Company AutoGen experiment.
+autogen-agentchat>=0.4.9
+autogen-ext[openai]>=0.4.9
+pyyaml>=6.0
+python-dotenv>=1.0
+agentops>=0.4.0
+pytest>=8.0

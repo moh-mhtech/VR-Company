@@ -1,0 +1,27 @@
+version: 1
+
+defaults:
+  company: read
+  shared: read_write
+  private_self: read_write
+  private_others: none
+
+principals:
+  ceo:
+    rules:
+      - path: /workspace/company/**
+        access: read_write
+      - path: /workspace/shared/**
+        access: read_write
+      - path: /workspace/self/**
+        access: read_write
+      - path: /workspace/accounting-view/**
+        access: read
+
+protected_boundaries:
+  runtime: denied
+  raw_accounting_write: denied
+  credentials: denied
+  host_filesystem: denied
+  docker_socket: denied
+  private_agent_cross_access: denied
