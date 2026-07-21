@@ -32,8 +32,18 @@ class MessageRouter:
             path = self._conv_dir(conversation_id)
             path.mkdir(parents=True, exist_ok=True)
             meta = path / "participants.json"
-            if not meta.exists():
-                meta.write_text(json.dumps({"conversation_id": conversation_id, "participants": participants}, indent=2), encoding="utf-8")
+            existing: list[str] = []
+            if meta.exists():
+                data = json.loads(meta.read_text(encoding="utf-8"))
+                existing = list(data.get("participants") or [])
+            merged = sorted(set(existing) | set(participants))
+            meta.write_text(
+                json.dumps({"conversation_id": conversation_id, "participants": merged}, indent=2),
+                encoding="utf-8",
+            )
+            messages = path / "messages.jsonl"
+            if not messages.exists():
+                messages.write_text("", encoding="utf-8")
             return conversation_id
 
         # Reuse existing conversation with exact participant set when possible

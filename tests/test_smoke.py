@@ -17,6 +17,18 @@ from runtime.plugin_loader import PluginLoader
 from runtime.workspace_manager import WorkspaceManager
 
 
+def test_message_router_merges_participants(tmp_path: Path) -> None:
+    router = MessageRouter(root=tmp_path / "conversations")
+    first = router.send(sender="human:client", recipient="sales", content="hi")
+    cid = first["conversation_id"]
+    assert router.participants_of(cid) == ["human:client", "sales"]
+    router.send(sender="sales", recipient="ceo", content="please assign", conversation_id=cid)
+    parts = router.participants_of(cid)
+    assert "ceo" in parts
+    assert "sales" in parts
+    assert "human:client" in parts
+
+
 def test_message_router_private_delivery(tmp_path: Path) -> None:
     router = MessageRouter(root=tmp_path / "conversations")
     record = router.send(sender="human:board", recipient="ceo", content="Hello CEO")

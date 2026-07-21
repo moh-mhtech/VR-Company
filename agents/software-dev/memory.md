@@ -1,3 +1,1 @@
-# Agent private memory
-
-_No durable notes yet._
+Work session 2026-07-21: received client request via sales for terminal prototype implementation. Scope: 5 dice per round, roll remaining dice, destroy matching dice on duplicate values, add unique dice values to score, continue until no dice remain, prompt for 3-letter initials, save high score, allow restart. No blockers identified yet; need to inspect codebase and implement/test before estimating readiness.

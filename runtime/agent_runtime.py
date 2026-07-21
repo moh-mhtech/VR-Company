@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +19,10 @@ from runtime.plugin_loader import PluginLoader
 from runtime.workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
+
+# Prevent runaway agent-to-agent ping-pong within one client turn.
+_delivery_depth: ContextVar[int] = ContextVar("delivery_depth", default=0)
+_MAX_DELIVERY_DEPTH = 6
 
 
 def _load_limits() -> dict[str, Any]:
@@ -80,6 +85,7 @@ class CompanyRuntime:
     def start(self) -> None:
         self.plugins.load()
         self._ensure_seed_ceo()
+        self._start_all_specs()
         self._persist_active()
         logger.info("Runtime started with agents: %s", ", ".join(self.active) or "(none)")
 
@@ -87,6 +93,18 @@ class CompanyRuntime:
         ceo_yaml = PROJECT_ROOT / "company" / "agents" / "ceo.yaml"
         if ceo_yaml.is_file() and "ceo" not in self.active:
             self.create_agent_from_spec(ceo_yaml, start=True)
+
+    def _start_all_specs(self) -> None:
+        """Start every company/agents/*.yaml so handoffs are not blocked by stopped workers."""
+        agents_dir = PROJECT_ROOT / "company" / "agents"
+        for path in sorted(agents_dir.glob("*.yaml")):
+            try:
+                spec = AgentSpec.from_yaml(path)
+            except Exception:  # noqa: BLE001
+                logger.exception("Skipping invalid agent spec %s", path)
+                continue
+            if spec.agent_id not in self.active:
+                self.create_agent_from_spec(path, start=True)
 
     def list_agents(self) -> list[dict[str, Any]]:
         result = []
@@ -230,18 +248,42 @@ class CompanyRuntime:
         if "messaging" in caps:
 
             async def send_message(recipient: str, content: str, conversation_id: str = "") -> str:
-                """Send a private message to another agent or human (e.g. human:board, human:client)."""
-                cid = conversation_id or None
+                """Send a private message to another agent or human (e.g. human:board, human:client).
+
+                Messages to other agents are delivered immediately (the recipient runs and may reply).
+                Do not reuse a client conversation id when contacting internal agents — a new
+                private thread is created unless the recipient is already a participant.
+                """
+                cid: str | None = conversation_id or None
+                if cid and not recipient.startswith("human:"):
+                    try:
+                        parts = runtime.router.participants_of(cid)
+                        if recipient not in parts:
+                            cid = None
+                    except FileNotFoundError:
+                        cid = None
+
                 record = runtime.router.send(
                     sender=agent_id,
                     recipient=recipient,
                     content=content,
                     conversation_id=cid,
                 )
-                # Deliver to recipient agent if active
-                if recipient in runtime.active and recipient != agent_id:
-                    # Queued only; recipient processes when addressed. Store for inbox.
-                    pass
+                if not recipient.startswith("human:") and recipient != agent_id:
+                    try:
+                        reply = await runtime.deliver_to_agent(
+                            recipient=recipient,
+                            content=content,
+                            conversation_id=record["conversation_id"],
+                            from_id=agent_id,
+                        )
+                        record["delivery"] = {
+                            "status": "delivered",
+                            "reply_preview": (reply or "")[:800],
+                        }
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("Agent delivery to %s failed", recipient)
+                        record["delivery"] = {"status": "failed", "error": str(exc)}
                 return json.dumps(record)
 
             async def read_inbox(limit: int = 10) -> str:
@@ -250,7 +292,13 @@ class CompanyRuntime:
 
             tools.extend(
                 [
-                    FunctionTool(send_message, description="Send a private message to a recipient."),
+                    FunctionTool(
+                        send_message,
+                        description=(
+                            "Send a private message. Humans: human:board / human:client. "
+                            "Other agents are woken immediately and may reply in this call."
+                        ),
+                    ),
                     FunctionTool(read_inbox, description="Read your private message inbox."),
                 ]
             )
@@ -304,16 +352,22 @@ class CompanyRuntime:
         return tools
 
     def _build_assistant(self, spec: AgentSpec) -> Any:
+        import inspect
+
         from autogen_agentchat.agents import AssistantAgent
 
-        return AssistantAgent(
-            name=spec.agent_id.replace("-", "_"),
-            model_client=self.gateway.client,
-            tools=self._build_tools(spec),
-            system_message=self._build_system_message(spec),
-            reflect_on_tool_use=True,
-            max_tool_iterations=int(self.limits.get("max_agent_turns", 20)),
-        )
+        kwargs: dict[str, Any] = {
+            "name": spec.agent_id.replace("-", "_"),
+            "model_client": self.gateway.client,
+            "tools": self._build_tools(spec),
+            "system_message": self._build_system_message(spec),
+            "reflect_on_tool_use": True,
+        }
+        # Compatible with both AutoGen 0.5.x and 0.7.x AssistantAgent signatures.
+        params = inspect.signature(AssistantAgent.__init__).parameters
+        if "max_tool_iterations" in params:
+            kwargs["max_tool_iterations"] = int(self.limits.get("max_agent_turns", 20))
+        return AssistantAgent(**kwargs)
 
     def _persist_active(self) -> None:
         payload = {
@@ -357,12 +411,25 @@ class CompanyRuntime:
                 }
 
         reply_text = await self._run_agent(recipient, content, conversation_id=cid, from_id=human_id)
-        reply_record = self.router.send(
-            sender=recipient,
-            recipient=human_id,
-            content=reply_text,
-            conversation_id=cid,
-        )
+
+        # If the agent already messaged this human via send_message during the turn,
+        # reuse that content and do not write a duplicate outbound message.
+        recent = self.router.history_for(cid, human_id, limit=10)
+        already = [
+            m
+            for m in recent
+            if m.get("sender") == recipient and m.get("recipient") == human_id
+        ]
+        if already and (already[-1].get("content") or "").strip():
+            reply_record = already[-1]
+            reply_text = reply_record["content"]
+        else:
+            reply_record = self.router.send(
+                sender=recipient,
+                recipient=human_id,
+                content=reply_text,
+                conversation_id=cid,
+            )
         return {
             "ok": True,
             "conversation_id": cid,
@@ -370,6 +437,48 @@ class CompanyRuntime:
             "reply": reply_record,
             "content": reply_text,
         }
+
+    def ensure_agent_running(self, agent_id: str) -> None:
+        if agent_id in self.active:
+            return
+        spec_path = PROJECT_ROOT / "company" / "agents" / f"{agent_id}.yaml"
+        if not spec_path.is_file():
+            raise FileNotFoundError(f"No agent spec for '{agent_id}' at {spec_path}")
+        self.create_agent_from_spec(spec_path, start=True)
+
+    async def deliver_to_agent(
+        self,
+        *,
+        recipient: str,
+        content: str,
+        conversation_id: str,
+        from_id: str,
+    ) -> str:
+        """Wake an agent to process an inbound private message and record their reply."""
+        depth = _delivery_depth.get()
+        if depth >= _MAX_DELIVERY_DEPTH:
+            raise RuntimeError(
+                f"Agent delivery depth limit ({_MAX_DELIVERY_DEPTH}) reached; "
+                f"message to {recipient} was stored but not processed"
+            )
+        token = _delivery_depth.set(depth + 1)
+        try:
+            self.ensure_agent_running(recipient)
+            reply_text = await self._run_agent(
+                recipient,
+                content,
+                conversation_id=conversation_id,
+                from_id=from_id,
+            )
+            self.router.send(
+                sender=recipient,
+                recipient=from_id,
+                content=reply_text,
+                conversation_id=conversation_id,
+            )
+            return reply_text
+        finally:
+            _delivery_depth.reset(token)
 
     async def _run_agent(
         self,
@@ -396,7 +505,19 @@ class CompanyRuntime:
             f"from `{from_id}`.\n\n"
             f"Recent conversation:\n{history_text or '(none)'}\n\n"
             f"Latest message:\n{user_content}\n\n"
-            "Respond as your role. Use tools when needed. Keep the reply concise."
+            "Respond as your role. Keep the final reply concise.\n\n"
+            "MANDATORY TOOL RULES:\n"
+            "- If work requires another employee (CEO, software-dev, sales, etc.), you MUST "
+            "call send_message to their agent_id in THIS turn before telling a human that "
+            "work is underway, assigned, or 'being checked'.\n"
+            "- Reading the inbox is not enough. If you lack status, message the responsible agent.\n"
+            "- For client implementation requests: message `software-dev` with the full scope "
+            "(and `ceo` if you need executive assignment). Wait for their tool reply "
+            "(delivery.reply_preview) before updating the client about readiness.\n"
+            "- Do not claim you contacted someone unless send_message returned a delivery result.\n"
+            "- Do NOT call send_message to the human you are already answering "
+            f"({from_id}); your final assistant text is delivered to them automatically.\n"
+            "- Persist important status with update_memory before you finish."
         )
 
         result = await assistant.run(

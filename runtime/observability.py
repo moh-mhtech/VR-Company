@@ -34,11 +34,19 @@ def init_agentops() -> bool:
         api_key=api_key,
         default_tags=["vr-company", "autogen-agentchat"],
         trace_name="vr-company-runtime",
-        instrument_llm_calls=True,
+        # OpenAI 2.x + AgentOps instrumentor can break on missing openai.resources.beta.chat.
+        # Keep session tracing; skip fragile LLM monkeypatching.
+        instrument_llm_calls=False,
         auto_start_session=True,
         log_session_replay_url=True,
         fail_safe=True,
     )
+    try:
+        from runtime.console_encoding import harden_console
+
+        harden_console()
+    except Exception:  # noqa: BLE001
+        pass
     _enabled = True
     logger.info("AgentOps enabled — view sessions at https://app.agentops.ai/drilldown")
     return True

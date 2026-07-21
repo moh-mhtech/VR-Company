@@ -15,3 +15,10 @@
   when other employees need them.
 - Do not treat private conversation content as company-wide information until
   an authorized participant shares it.
+
+## Required tool use for coordination
+
+Talking about a handoff is not a handoff. To assign or request work from another
+employee you must use the messaging tool to their agent id (for example
+`software-dev` or `ceo`). Wait for their reply before telling a client that work
+is complete or ready to test.
