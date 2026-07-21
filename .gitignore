@@ -219,6 +219,9 @@ __marimo__/
 
 # VR-Company experiment local state
 .env.local
+experiments/**
+!experiments/.gitkeep
+# Legacy single-workspace paths (pre multi-experiment); keep ignored if present
 runtime-data/conversations/**
 runtime-data/accounting/**
 runtime-data/logs/**
@@ -226,9 +229,5 @@ runtime-data/active-agents.json
 !runtime-data/**/.gitkeep
 snapshots/**
 !snapshots/.gitkeep
-shared/**/test-note.md
-agents/*/artifacts/**
-agents/*/journal/**
-!agents/**/.gitkeep
 _bootstrap_scaffold.py
 *.egg-info/

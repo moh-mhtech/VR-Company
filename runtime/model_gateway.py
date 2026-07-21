@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from runtime.paths import PROJECT_ROOT
+from runtime.paths import runtime_data_dir
 from runtime.plugin_loader import PluginLoader
 
 
@@ -28,8 +28,9 @@ class CallContext:
 class ModelGateway:
     def __init__(self, plugin_loader: PluginLoader | None = None) -> None:
         self.plugin_loader = plugin_loader or PluginLoader()
-        self.raw_log = PROJECT_ROOT / "runtime-data" / "accounting" / "raw-usage.jsonl"
-        self.view_dir = PROJECT_ROOT / "runtime-data" / "accounting" / "view"
+        data = runtime_data_dir()
+        self.raw_log = data / "accounting" / "raw-usage.jsonl"
+        self.view_dir = data / "accounting" / "view"
         self.raw_log.parent.mkdir(parents=True, exist_ok=True)
         self.view_dir.mkdir(parents=True, exist_ok=True)
         self.model = os.getenv("OPENAI_MODEL", "gpt-5.4-nano")

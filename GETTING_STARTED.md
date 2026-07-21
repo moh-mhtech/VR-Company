@@ -83,21 +83,59 @@ Smoke tests do **not** call the model:
 pytest -q
 ```
 
-## 6. Start the central runtime
+## 6. Create an experiment and start the runtime
 
-In terminal A:
+Each run lives under `experiments/<name>/`, copied from the immutable `seed/` template.
+
+```powershell
+python -m runtime.main experiment create my-run --notes "Phase 0" --start
+python -m runtime.main --experiment my-run
+```
+
+Or create from the web console after starting the supervisor with no experiment:
 
 ```powershell
 python -m runtime.main
 ```
 
-You should see a log line that the runtime is listening on `127.0.0.1:8765`.
+Open [http://127.0.0.1:8787](http://127.0.0.1:8787) → **Experiments** menu → create / start / switch / delete / rename / duplicate / export.
 
-If `AGENTOPS_API_KEY` is set, you should also see `AgentOps enabled` and can open [app.agentops.ai/drilldown](https://app.agentops.ai/drilldown) while you chat in the board/client CLIs.
+You should see log lines for the AutoGen worker on `127.0.0.1:8765` once an experiment is started.
+
+With web deps installed (`pip install -e ".[web]"`), the supervisor also starts the console. Use `--no-web` for the AutoGen worker only:
+
+```powershell
+python -m runtime.main --experiment my-run --no-web
+```
+
+CLI experiment commands:
+
+```powershell
+python -m runtime.main experiment list
+python -m runtime.main experiment create demo --notes "trial"
+python -m runtime.main experiment start demo
+python -m runtime.main experiment duplicate demo demo-b
+python -m runtime.main experiment rename demo-b demo-fork
+python -m runtime.main experiment export demo-fork
+python -m runtime.main experiment delete demo-fork --force
+```
+
+If `AGENTOPS_API_KEY` is set, you should also see `AgentOps enabled` and can open [app.agentops.ai/drilldown](https://app.agentops.ai/drilldown) while you chat in the board/client CLIs or web console.
 
 Leave this process running.
 
-## 7. Open the board CLI (human = board of directors)
+## 7. Optional standalone processes
+
+Usually you do **not** need these — `runtime.main` starts both.
+
+```powershell
+python -m runtime.autogen_server --experiment my-run   # simulation TCP worker only
+python -m web.main                                     # console against an existing worker
+```
+
+Open [http://127.0.0.1:8787](http://127.0.0.1:8787). The console shows the active experiment name, agents, a live event feed, conversations, and board/client composers. Use the **Experiments** menu to manage runs (only one can run at a time). Admin **Restart session** refreshes in-memory AutoGen assistants without changing experiment files.
+
+## 8. Open the board CLI (human = board of directors)
 
 In terminal B (venv activated):
 
@@ -130,12 +168,12 @@ Other one-shot example:
 python -m interfaces.board_cli -m "List current company status from organization.md"
 ```
 
-## 8. Client CLI (after Sales exists)
+## 9. Client CLI (after Sales exists)
 
-When the CEO has hired a sales agent (for example `sales_001`):
+When the CEO has hired a sales agent (seed id is `sales`):
 
 ```powershell
-python -m interfaces.client_cli --recipient sales_001
+python -m interfaces.client_cli --recipient sales
 ```
 
 Same rule as the board CLI: **one line per message** — Enter submits immediately.
@@ -148,17 +186,17 @@ Hi, I need a small internal tool that tracks project proposals. Can you prepare 
 
 Commands:
 
-- `/to sales_001` — change recipient
+- `/to sales` — change recipient
 - `/agents` — list agents
 - `/quit` — exit
 
 One-shot:
 
 ```powershell
-python -m interfaces.client_cli --recipient sales_001 -m "Hi, I need a small internal tool that tracks project proposals. Can you prepare a short proposal and price estimate?"
+python -m interfaces.client_cli --recipient sales -m "Hi, I need a small internal tool that tracks project proposals. Can you prepare a short proposal and price estimate?"
 ```
 
-## 9. Wire this folder to GitHub (optional)
+## 10. Wire this folder to GitHub (optional)
 
 This machine did **not** have `gh` logged in when the project was scaffolded. To push:
 
@@ -194,6 +232,7 @@ Use **single-line** board/client messages for each step (or `-m "..."`).
 | Symptom | What to check |
 |--------|----------------|
 | `Cannot connect to runtime` | Start `python -m runtime.main` first |
+| Web console shows runtime down | Start with `python -m runtime.main` (not `--no-web`), ensure `pip install -e ".[web]"` |
 | `OPENAI_API_KEY is not set` | Create `.env` from `.env.example` and restart the runtime |
 | No AgentOps sessions | Set `AGENTOPS_API_KEY`, `pip install agentops`, restart runtime, then send a board/client message |
 | `Access denied` / protected path | Agents cannot touch `runtime/`, `.env`, or raw `runtime-data/accounting/raw-usage.jsonl` |

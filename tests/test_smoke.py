@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -12,9 +13,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from runtime.message_router import MessageRouter
+from runtime.paths import SEED_DIR, set_experiment
 from runtime.permission_reconciler import Access, PermissionReconciler
 from runtime.plugin_loader import PluginLoader
 from runtime.workspace_manager import WorkspaceManager
+
+
+@pytest.fixture
+def active_seed_experiment(tmp_path: Path):
+    """Copy seed into a temp experiment and activate it for path-dependent tests."""
+    dest = tmp_path / "exp"
+    shutil.copytree(SEED_DIR, dest)
+    set_experiment("exp", root=dest)
+    yield dest
+    set_experiment(None)
 
 
 def test_message_router_merges_participants(tmp_path: Path) -> None:
@@ -41,21 +53,21 @@ def test_message_router_private_delivery(tmp_path: Path) -> None:
         router.history_for(cid, "sales_001")
 
 
-def test_permissions_ceo_can_write_company() -> None:
+def test_permissions_ceo_can_write_company(active_seed_experiment: Path) -> None:
     perms = PermissionReconciler.load()
     assert perms.access_for("ceo", "/workspace/company/organization.md") is Access.READ_WRITE
     host = perms.assert_access("ceo", "/workspace/company/organization.md", need_write=True)
     assert host.name == "organization.md"
 
 
-def test_permissions_block_runtime_and_raw_accounting() -> None:
+def test_permissions_block_escape(active_seed_experiment: Path) -> None:
     perms = PermissionReconciler.load()
+    # Path traversal out of experiment workspace must be denied.
     with pytest.raises(PermissionError):
-        perms.assert_access("ceo", "/workspace/company/../runtime/main.py", need_write=False)
+        perms.assert_access("ceo", "/workspace/company/../../../.env", need_write=False)
 
 
-def test_workspace_read_write_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Use real project company path via permissions; write under shared via CEO
+def test_workspace_read_write_roundtrip(active_seed_experiment: Path) -> None:
     perms = PermissionReconciler.load()
     ws = WorkspaceManager(perms, {"max_file_read_chars": 1000})
     path = "/workspace/shared/knowledge/test-note.md"
@@ -66,7 +78,7 @@ def test_workspace_read_write_roundtrip(tmp_path: Path, monkeypatch: pytest.Monk
     assert "test-note.md" in listed
 
 
-def test_accounting_plugin_loads() -> None:
+def test_accounting_plugin_loads(active_seed_experiment: Path) -> None:
     loader = PluginLoader()
     mod = loader.load()
     assert hasattr(mod, "prepare_call")
@@ -79,7 +91,7 @@ def test_accounting_plugin_loads() -> None:
     assert out["total_tokens"] == 3
 
 
-def test_raw_usage_append(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_raw_usage_append(tmp_path: Path, active_seed_experiment: Path) -> None:
     from runtime.model_gateway import CallContext, ModelGateway
 
     gw = ModelGateway()

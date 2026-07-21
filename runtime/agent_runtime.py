@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
+import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,9 +14,16 @@ from typing import Any, Callable
 
 import yaml
 
+from runtime.event_bus import EventBus, preview
 from runtime.message_router import MessageRouter
 from runtime.model_gateway import CallContext, ModelGateway
-from runtime.paths import PROJECT_ROOT, agent_private_dir
+from runtime.paths import (
+    PROJECT_ROOT,
+    agent_private_dir,
+    company_dir,
+    experiment_root,
+    runtime_data_dir,
+)
 from runtime.permission_reconciler import PermissionReconciler
 from runtime.plugin_loader import PluginLoader
 from runtime.workspace_manager import WorkspaceManager
@@ -73,14 +83,17 @@ class CompanyRuntime:
 
     def __init__(self) -> None:
         self.limits = _load_limits()
+        buffer_size = int(self.limits.get("event_buffer_size") or 500)
+        self.events = EventBus(buffer_size=buffer_size)
         self.permissions = PermissionReconciler.load()
         self.workspace = WorkspaceManager(self.permissions, self.limits)
-        self.router = MessageRouter()
+        self.router = MessageRouter(event_bus=self.events)
         self.plugins = PluginLoader()
         self.gateway = ModelGateway(self.plugins)
         self.active: dict[str, ActiveAgent] = {}
-        self.state_path = PROJECT_ROOT / "runtime-data" / "active-agents.json"
+        self.state_path = runtime_data_dir() / "active-agents.json"
         self.workspace.ensure_accounting_view()
+        self._admin_lock = threading.Lock()
 
     def start(self) -> None:
         self.plugins.load()
@@ -88,16 +101,46 @@ class CompanyRuntime:
         self._start_all_specs()
         self._persist_active()
         logger.info("Runtime started with agents: %s", ", ".join(self.active) or "(none)")
+        self.events.emit(
+            "runtime.ready",
+            agents=[
+                {"agent_id": aid, "display_name": self.active[aid].spec.display_name}
+                for aid in sorted(self.active)
+            ],
+        )
+
+    def restart_session(self) -> dict[str, Any]:
+        """Drop in-memory AutoGen assistants and start a fresh observability session.
+
+        Keeps filesystem state (conversations, company docs, agent memory).
+        """
+        with self._admin_lock:
+            for active in self.active.values():
+                active.assistant = None
+            self.events.clear()
+            try:
+                from runtime.observability import end_agentops, init_agentops
+
+                end_agentops("Indeterminate")
+                init_agentops()
+            except Exception:  # noqa: BLE001
+                logger.exception("Observability session restart failed")
+            self.events.emit(
+                "session.restarted",
+                agents=[{"agent_id": aid} for aid in sorted(self.active)],
+            )
+            logger.info("AutoGen session restarted (%d agents)", len(self.active))
+            return {"ok": True, "agents": list(sorted(self.active))}
 
     def _ensure_seed_ceo(self) -> None:
-        ceo_yaml = PROJECT_ROOT / "company" / "agents" / "ceo.yaml"
+        ceo_yaml = company_dir() / "agents" / "ceo.yaml"
         if ceo_yaml.is_file() and "ceo" not in self.active:
             self.create_agent_from_spec(ceo_yaml, start=True)
 
     def _start_all_specs(self) -> None:
         """Start every company/agents/*.yaml so handoffs are not blocked by stopped workers."""
-        agents_dir = PROJECT_ROOT / "company" / "agents"
-        for path in sorted(agents_dir.glob("*.yaml")):
+        agents_yaml = company_dir() / "agents"
+        for path in sorted(agents_yaml.glob("*.yaml")):
             try:
                 spec = AgentSpec.from_yaml(path)
             except Exception:  # noqa: BLE001
@@ -118,8 +161,8 @@ class CompanyRuntime:
                 }
             )
         # Also list specs on disk that are not running
-        agents_dir = PROJECT_ROOT / "company" / "agents"
-        for path in sorted(agents_dir.glob("*.yaml")):
+        agents_yaml = company_dir() / "agents"
+        for path in sorted(agents_yaml.glob("*.yaml")):
             spec = AgentSpec.from_yaml(path)
             if spec.agent_id not in self.active:
                 result.append(
@@ -135,7 +178,7 @@ class CompanyRuntime:
     def create_agent_from_spec(self, spec_path: Path | str, start: bool = True) -> str:
         path = Path(spec_path)
         if not path.is_absolute():
-            path = PROJECT_ROOT / path
+            path = experiment_root() / path
         spec = AgentSpec.from_yaml(path)
         private = agent_private_dir(spec.agent_id)
         private.mkdir(parents=True, exist_ok=True)
@@ -156,8 +199,10 @@ class CompanyRuntime:
     def stop_agent(self, agent_id: str) -> str:
         if agent_id not in self.active:
             return f"Agent {agent_id} is not active"
+        display_name = self.active[agent_id].spec.display_name
         del self.active[agent_id]
         self._persist_active()
+        self.events.emit("agent.stopped", agent_id=agent_id, display_name=display_name)
         return f"Stopped agent {agent_id}"
 
     def _start_agent(self, spec: AgentSpec) -> ActiveAgent:
@@ -165,25 +210,35 @@ class CompanyRuntime:
         # server can start before OPENAI_API_KEY is configured.
         active = ActiveAgent(spec=spec, assistant=None)
         self.active[spec.agent_id] = active
+        self.events.emit(
+            "agent.started",
+            agent_id=spec.agent_id,
+            display_name=spec.display_name,
+            manager=spec.manager,
+        )
         return active
 
     def _ensure_assistant(self, agent_id: str) -> Any:
         active = self.active[agent_id]
-        if active.assistant is None:
-            active.assistant = self._build_assistant(active.spec)
+        # Always rebuild so mutable company prompts/docs apply on the next turn.
+        spec_path = company_dir() / "agents" / f"{agent_id}.yaml"
+        if spec_path.is_file():
+            active.spec = AgentSpec.from_yaml(spec_path)
+        active.assistant = self._build_assistant(active.spec)
         return active.assistant
 
     def _build_system_message(self, spec: AgentSpec) -> str:
         immutable = _read_text(PROJECT_ROOT / "runtime" / "immutable_runtime_prompt.txt")
         parts = [immutable.strip(), "", "---", "", f"You are agent `{spec.agent_id}` ({spec.display_name}).", ""]
+        root = experiment_root()
         for rel in spec.system_prompt_files:
-            path = PROJECT_ROOT / rel
+            path = root / rel
             if path.is_file():
                 parts.append(_read_text(path).strip())
                 parts.append("")
         parts.append("## Initial company context")
         for rel in spec.initial_context_files:
-            path = PROJECT_ROOT / rel
+            path = root / rel
             if path.is_file():
                 parts.append(f"### {rel}")
                 parts.append(_read_text(path).strip())
@@ -193,7 +248,7 @@ class CompanyRuntime:
         if mem.is_file():
             parts.append("## Your private memory")
             parts.append(_read_text(mem).strip())
-        manifest = PROJECT_ROOT / "company" / "manifest.yaml"
+        manifest = company_dir() / "manifest.yaml"
         if manifest.is_file():
             parts.append("")
             parts.append("## Company manifest")
@@ -206,6 +261,52 @@ class CompanyRuntime:
         )
         return "\n".join(parts)
 
+    def _instrument_tool(self, agent_id: str, tool_name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Wrap an async tool so each call emits tool.called / tool.result events."""
+        import functools
+        import inspect
+
+        runtime = self
+        sig = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        async def wrapped(*args: Any, **kwargs: Any) -> Any:
+            call_id = f"call_{uuid.uuid4().hex[:8]}"
+            bound = sig.bind_partial(*args, **kwargs)
+            arg_preview = {k: preview(v) for k, v in bound.arguments.items()}
+            runtime.events.emit(
+                "tool.called",
+                agent_id=agent_id,
+                tool=tool_name,
+                call_id=call_id,
+                args=arg_preview,
+            )
+            try:
+                result = await fn(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                runtime.events.emit(
+                    "tool.result",
+                    agent_id=agent_id,
+                    tool=tool_name,
+                    call_id=call_id,
+                    ok=False,
+                    error=str(exc),
+                    result_preview="",
+                )
+                raise
+            runtime.events.emit(
+                "tool.result",
+                agent_id=agent_id,
+                tool=tool_name,
+                call_id=call_id,
+                ok=True,
+                result_preview=preview(result, limit=600),
+            )
+            return result
+
+        wrapped.__signature__ = sig  # type: ignore[attr-defined]
+        return wrapped
+
     def _build_tools(self, spec: AgentSpec) -> list[Any]:
         from autogen_core.tools import FunctionTool
 
@@ -213,6 +314,11 @@ class CompanyRuntime:
         caps = set(spec.capabilities)
         tools: list[Any] = []
         runtime = self
+
+        def add_tool(fn: Callable[..., Any], description: str, name: str | None = None) -> None:
+            tool_name = name or getattr(fn, "__name__", "tool")
+            instrumented = runtime._instrument_tool(agent_id, tool_name, fn)
+            tools.append(FunctionTool(instrumented, description=description, name=tool_name))
 
         if "filesystem" in caps or "modify_company" in caps:
 
@@ -229,13 +335,9 @@ class CompanyRuntime:
                 """List files in a permitted workspace directory."""
                 return runtime.workspace.list_dir(agent_id, path)
 
-            tools.extend(
-                [
-                    FunctionTool(read_file, description="Read a permitted workspace file."),
-                    FunctionTool(write_file, description="Write a permitted workspace file."),
-                    FunctionTool(list_files, description="List a permitted workspace directory."),
-                ]
-            )
+            add_tool(read_file, "Read a permitted workspace file.")
+            add_tool(write_file, "Write a permitted workspace file.")
+            add_tool(list_files, "List a permitted workspace directory.")
 
         if "code_execution" in caps:
 
@@ -243,7 +345,7 @@ class CompanyRuntime:
                 """Run Python code in your private workspace directory."""
                 return runtime.workspace.run_code(agent_id, code, language="python")
 
-            tools.append(FunctionTool(run_python, description="Run Python in your private workspace."))
+            add_tool(run_python, "Run Python in your private workspace.")
 
         if "messaging" in caps:
 
@@ -254,6 +356,15 @@ class CompanyRuntime:
                 Do not reuse a client conversation id when contacting internal agents — a new
                 private thread is created unless the recipient is already a participant.
                 """
+                if recipient == agent_id:
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": "Cannot message yourself. Implement the work with tools "
+                            "or message a different agent id.",
+                        }
+                    )
+
                 cid: str | None = conversation_id or None
                 if cid and not recipient.startswith("human:"):
                     try:
@@ -290,18 +401,14 @@ class CompanyRuntime:
                 """Read recent private messages where you are a participant."""
                 return json.dumps(runtime.router.inbox(agent_id, limit=limit), indent=2)
 
-            tools.extend(
-                [
-                    FunctionTool(
-                        send_message,
-                        description=(
-                            "Send a private message. Humans: human:board / human:client. "
-                            "Other agents are woken immediately and may reply in this call."
-                        ),
-                    ),
-                    FunctionTool(read_inbox, description="Read your private message inbox."),
-                ]
+            add_tool(
+                send_message,
+                (
+                    "Send a private message. Humans: human:board / human:client. "
+                    "Other agents are woken immediately and may reply in this call."
+                ),
             )
+            add_tool(read_inbox, "Read your private message inbox.")
 
         if "list_agents" in caps:
 
@@ -309,7 +416,7 @@ class CompanyRuntime:
                 """List known and active agents."""
                 return json.dumps(runtime.list_agents(), indent=2)
 
-            tools.append(FunctionTool(list_agents, description="List company agents."))
+            add_tool(list_agents, "List company agents.")
 
         if "create_agent" in caps:
 
@@ -317,11 +424,9 @@ class CompanyRuntime:
                 """Create/start an agent from a YAML spec under company/agents/."""
                 return runtime.create_agent_from_spec(spec_relative_path, start=True)
 
-            tools.append(
-                FunctionTool(
-                    create_agent,
-                    description="Create and start an agent from a company/agents/*.yaml spec path.",
-                )
+            add_tool(
+                create_agent,
+                "Create and start an agent from a company/agents/*.yaml spec path.",
             )
 
         if "stop_agent" in caps:
@@ -330,25 +435,25 @@ class CompanyRuntime:
                 """Stop a running agent by id."""
                 return runtime.stop_agent(target_agent_id)
 
-            tools.append(FunctionTool(stop_agent, description="Stop a running agent."))
+            add_tool(stop_agent, "Stop a running agent.")
 
         if "read_usage" in caps:
 
             async def read_usage(limit: int = 20) -> str:
                 """Read the company token usage view (not raw immutable storage)."""
-                view = PROJECT_ROOT / "runtime-data" / "accounting" / "view" / "usage-summary.jsonl"
+                view = runtime_data_dir() / "accounting" / "view" / "usage-summary.jsonl"
                 if not view.is_file():
                     return "[]"
                 lines = [ln for ln in view.read_text(encoding="utf-8").splitlines() if ln.strip()]
                 return "\n".join(lines[-limit:])
 
-            tools.append(FunctionTool(read_usage, description="Read token usage summary view."))
+            add_tool(read_usage, "Read token usage summary view.")
 
         async def update_memory(content: str) -> str:
             """Replace your private memory.md with durable notes."""
             return runtime.workspace.update_private_memory(agent_id, content)
 
-        tools.append(FunctionTool(update_memory, description="Update your private memory.md."))
+        add_tool(update_memory, "Update your private memory.md.")
         return tools
 
     def _build_assistant(self, spec: AgentSpec) -> Any:
@@ -399,7 +504,7 @@ class CompanyRuntime:
 
         if recipient not in self.active:
             # Try to start from spec
-            spec_path = PROJECT_ROOT / "company" / "agents" / f"{recipient}.yaml"
+            spec_path = company_dir() / "agents" / f"{recipient}.yaml"
             if spec_path.is_file():
                 self.create_agent_from_spec(spec_path, start=True)
             else:
@@ -441,7 +546,7 @@ class CompanyRuntime:
     def ensure_agent_running(self, agent_id: str) -> None:
         if agent_id in self.active:
             return
-        spec_path = PROJECT_ROOT / "company" / "agents" / f"{agent_id}.yaml"
+        spec_path = company_dir() / "agents" / f"{agent_id}.yaml"
         if not spec_path.is_file():
             raise FileNotFoundError(f"No agent spec for '{agent_id}' at {spec_path}")
         self.create_agent_from_spec(spec_path, start=True)
@@ -491,56 +596,90 @@ class CompanyRuntime:
         from autogen_agentchat.messages import TextMessage
         from autogen_core import CancellationToken
 
-        assistant = self._ensure_assistant(agent_id)
-        # Reload permissions so access-control changes apply between turns.
-        self.permissions.reload()
-
-        history = self.router.history_for(conversation_id, agent_id, limit=30)
-        history_text = "\n".join(
-            f"[{m.get('timestamp')}] {m.get('sender')} -> {m.get('recipient')}: {m.get('content')}"
-            for m in history[:-1]  # exclude the just-appended inbound if duplicated
+        started = time.perf_counter()
+        self.events.emit(
+            "turn.started",
+            agent_id=agent_id,
+            conversation_id=conversation_id,
+            from_id=from_id,
+            content_preview=preview(user_content, limit=300),
         )
-        prompt = (
-            f"You have a new private message in conversation `{conversation_id}` "
-            f"from `{from_id}`.\n\n"
-            f"Recent conversation:\n{history_text or '(none)'}\n\n"
-            f"Latest message:\n{user_content}\n\n"
-            "Respond as your role. Keep the final reply concise.\n\n"
-            "MANDATORY TOOL RULES:\n"
-            "- If work requires another employee (CEO, software-dev, sales, etc.), you MUST "
-            "call send_message to their agent_id in THIS turn before telling a human that "
-            "work is underway, assigned, or 'being checked'.\n"
-            "- Reading the inbox is not enough. If you lack status, message the responsible agent.\n"
-            "- For client implementation requests: message `software-dev` with the full scope "
-            "(and `ceo` if you need executive assignment). Wait for their tool reply "
-            "(delivery.reply_preview) before updating the client about readiness.\n"
-            "- Do not claim you contacted someone unless send_message returned a delivery result.\n"
-            "- Do NOT call send_message to the human you are already answering "
-            f"({from_id}); your final assistant text is delivered to them automatically.\n"
-            "- Persist important status with update_memory before you finish."
-        )
+        try:
+            assistant = self._ensure_assistant(agent_id)
+            # Reload permissions so access-control changes apply between turns.
+            self.permissions.reload()
 
-        result = await assistant.run(
-            task=prompt,
-            cancellation_token=CancellationToken(),
-        )
+            history = self.router.history_for(conversation_id, agent_id, limit=30)
+            history_text = "\n".join(
+                f"[{m.get('timestamp')}] {m.get('sender')} -> {m.get('recipient')}: {m.get('content')}"
+                for m in history[:-1]  # exclude the just-appended inbound if duplicated
+            )
+            prompt = (
+                f"You have a new private message in conversation `{conversation_id}` "
+                f"from `{from_id}`.\n\n"
+                f"Recent conversation:\n{history_text or '(none)'}\n\n"
+                f"Latest message:\n{user_content}\n\n"
+                "Respond as your role. Keep the final reply concise.\n\n"
+                "MANDATORY TOOL RULES:\n"
+                "- If work requires another employee (CEO, software-dev, sales, etc.), you MUST "
+                "call send_message to their agent_id in THIS turn before telling a human that "
+                "work is underway, assigned, or 'being checked'.\n"
+                "- Reading the inbox is not enough. If you lack status, message the responsible agent.\n"
+                "- For client implementation requests: message `software-dev` with the full scope and "
+                "an explicit instruction to create a NEW project under /workspace/shared/projects/. "
+                "Wait for delivery.reply_preview.\n"
+                "- If a coworker's reply is a blocker you can resolve (e.g. they ask for an existing "
+                "codebase on greenfield work), send_message them AGAIN in this same turn with the "
+                "correction and ask them to implement now. Do not end the turn after one blocked reply.\n"
+                "- Never send_message to yourself.\n"
+                "- Software builders: empty shared/projects means create files, not stop.\n"
+                "- Do not claim you contacted someone unless send_message returned a delivery result.\n"
+                "- Do NOT call send_message to the human you are already answering "
+                f"({from_id}); your final assistant text is delivered to them automatically.\n"
+                "- Persist important status with update_memory before you finish."
+            )
 
-        usage = self.gateway.extract_usage_from_result(result)
-        # Also try messages for usage
-        if hasattr(result, "messages"):
-            for msg in reversed(list(result.messages)):
-                u = self.gateway.extract_usage_from_result(msg)
-                if any(v is not None for v in u.values()):
-                    usage = u
-                    break
+            result = await assistant.run(
+                task=prompt,
+                cancellation_token=CancellationToken(),
+            )
 
-        self.gateway.record_usage(
-            CallContext(agent_id=agent_id, conversation_id=conversation_id, metadata={}),
-            usage,
-        )
+            usage = self.gateway.extract_usage_from_result(result)
+            # Also try messages for usage
+            if hasattr(result, "messages"):
+                for msg in reversed(list(result.messages)):
+                    u = self.gateway.extract_usage_from_result(msg)
+                    if any(v is not None for v in u.values()):
+                        usage = u
+                        break
 
-        text = self._result_to_text(result)
-        return text
+            self.gateway.record_usage(
+                CallContext(agent_id=agent_id, conversation_id=conversation_id, metadata={}),
+                usage,
+            )
+
+            text = self._result_to_text(result)
+            self.events.emit(
+                "turn.ended",
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+                from_id=from_id,
+                ok=True,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                reply_preview=preview(text, limit=400),
+            )
+            return text
+        except Exception as exc:  # noqa: BLE001
+            self.events.emit(
+                "turn.ended",
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+                from_id=from_id,
+                ok=False,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                error=str(exc),
+            )
+            raise
 
     @staticmethod
     def _result_to_text(result: Any) -> str:

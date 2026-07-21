@@ -7,27 +7,31 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from runtime.paths import PROJECT_ROOT
+from runtime.paths import company_dir
 
 
 class PluginLoader:
     def __init__(self, plugin_path: Path | None = None) -> None:
-        self.plugin_path = plugin_path or (
-            PROJECT_ROOT / "company" / "accounting" / "accounting_plugin.py"
-        )
+        self.plugin_path = plugin_path
         self._module: ModuleType | None = None
         self.version = "1"
 
+    def _resolve_plugin_path(self) -> Path:
+        if self.plugin_path is not None:
+            return self.plugin_path
+        return company_dir() / "accounting" / "accounting_plugin.py"
+
     def load(self) -> ModuleType:
+        plugin_path = self._resolve_plugin_path()
         spec = importlib.util.spec_from_file_location(
-            "company_accounting_plugin", self.plugin_path
+            "company_accounting_plugin", plugin_path
         )
         if spec is None or spec.loader is None:
-            raise ImportError(f"Cannot load accounting plugin from {self.plugin_path}")
+            raise ImportError(f"Cannot load accounting plugin from {plugin_path}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         self._module = module
-        cfg = PROJECT_ROOT / "company" / "accounting" / "configuration.yaml"
+        cfg = company_dir() / "accounting" / "configuration.yaml"
         if cfg.exists():
             import yaml
 

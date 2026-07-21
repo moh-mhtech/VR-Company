@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from runtime.paths import PROJECT_ROOT
+from runtime.paths import runtime_data_dir
+
+if TYPE_CHECKING:
+    from runtime.event_bus import EventBus
 
 
 def _utcnow() -> str:
@@ -18,9 +21,12 @@ def _utcnow() -> str:
 
 @dataclass
 class MessageRouter:
-    root: Path = PROJECT_ROOT / "runtime-data" / "conversations"
+    root: Path | None = None
+    event_bus: EventBus | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.root is None:
+            self.root = runtime_data_dir() / "conversations"
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _conv_dir(self, conversation_id: str) -> Path:
@@ -102,7 +108,10 @@ class MessageRouter:
         path = self._conv_dir(cid) / "messages.jsonl"
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
-        return {"conversation_id": cid, **record}
+        out = {"conversation_id": cid, **record}
+        if self.event_bus is not None:
+            self.event_bus.emit("message.sent", **out)
+        return out
 
     def history_for(self, conversation_id: str, actor: str, limit: int = 50) -> list[dict[str, Any]]:
         self.assert_participant(conversation_id, actor)
@@ -127,3 +136,46 @@ class MessageRouter:
                 items.append({"conversation_id": child.name, **msg})
         items.sort(key=lambda m: m.get("timestamp") or "")
         return items[-limit:]
+
+    def list_conversations(self) -> list[dict[str, Any]]:
+        """Observer listing of all conversations (no participant filter)."""
+        results: list[dict[str, Any]] = []
+        if not self.root.is_dir():
+            return results
+        for child in sorted(self.root.iterdir()):
+            if not child.is_dir():
+                continue
+            meta = child / "participants.json"
+            if not meta.is_file():
+                continue
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            messages_path = child / "messages.jsonl"
+            last_timestamp = ""
+            message_count = 0
+            if messages_path.is_file():
+                lines = [ln for ln in messages_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+                message_count = len(lines)
+                if lines:
+                    try:
+                        last_timestamp = json.loads(lines[-1]).get("timestamp") or ""
+                    except json.JSONDecodeError:
+                        last_timestamp = ""
+            results.append(
+                {
+                    "conversation_id": child.name,
+                    "participants": list(data.get("participants") or []),
+                    "message_count": message_count,
+                    "last_timestamp": last_timestamp,
+                }
+            )
+        results.sort(key=lambda c: c.get("last_timestamp") or "", reverse=True)
+        return results
+
+    def history_observer(self, conversation_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """Full conversation history for operator UI (skips participant checks)."""
+        path = self._conv_dir(conversation_id) / "messages.jsonl"
+        if not path.is_file():
+            raise FileNotFoundError(conversation_id)
+        lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        records = [json.loads(ln) for ln in lines[-limit:]]
+        return records

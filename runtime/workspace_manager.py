@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from runtime.paths import PROJECT_ROOT
+from runtime.paths import runtime_data_dir
 from runtime.permission_reconciler import PermissionReconciler
 
 
@@ -74,6 +74,6 @@ class WorkspaceManager:
         return self.write_file(agent_id, "/workspace/self/memory.md", content)
 
     def ensure_accounting_view(self) -> Path:
-        view_dir = PROJECT_ROOT / "runtime-data" / "accounting" / "view"
+        view_dir = runtime_data_dir() / "accounting" / "view"
         view_dir.mkdir(parents=True, exist_ok=True)
         return view_dir

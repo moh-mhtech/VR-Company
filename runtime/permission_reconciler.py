@@ -9,7 +9,15 @@ from typing import Any
 
 import yaml
 
-from runtime.paths import PROJECT_ROOT, agent_private_dir, resolve_workspace_path
+from runtime.paths import (
+    PROJECT_ROOT,
+    agent_private_dir,
+    agents_dir,
+    company_dir,
+    experiment_root,
+    resolve_workspace_path,
+    runtime_data_dir,
+)
 
 
 class Access(Enum):
@@ -24,7 +32,7 @@ class PermissionReconciler:
 
     @classmethod
     def load(cls, path: Path | None = None) -> PermissionReconciler:
-        path = path or (PROJECT_ROOT / "company" / "access-control.yaml")
+        path = path or (company_dir() / "access-control.yaml")
         with path.open(encoding="utf-8") as fh:
             return cls(config=yaml.safe_load(fh) or {})
 
@@ -71,29 +79,28 @@ class PermissionReconciler:
 
     def _assert_not_protected(self, host: Path, agent_id: str) -> None:
         host = host.resolve()
-        root = PROJECT_ROOT.resolve()
-        if not str(host).startswith(str(root)):
+        exp = experiment_root().resolve()
+        if not (host == exp or host.is_relative_to(exp)):
             raise PermissionError("Host filesystem escape blocked")
 
-        runtime_dir = (root / "runtime").resolve()
+        project = PROJECT_ROOT.resolve()
+        runtime_dir = (project / "runtime").resolve()
         if host == runtime_dir or runtime_dir in host.parents or host.is_relative_to(runtime_dir):
-            # Allow only immutable prompt read? Plan says no access to runtime/**
             raise PermissionError("Runtime directory is protected")
 
-        raw_accounting = (root / "runtime-data" / "accounting" / "raw-usage.jsonl").resolve()
+        raw_accounting = (runtime_data_dir() / "accounting" / "raw-usage.jsonl").resolve()
         if host == raw_accounting:
             raise PermissionError("Raw accounting storage is protected")
 
-        creds = root / ".env"
+        creds = project / ".env"
         if host == creds.resolve():
             raise PermissionError("Credentials are protected")
 
         # Block other agents' private directories
-        agents_root = (root / "agents").resolve()
+        agents_root = agents_dir().resolve()
         if agents_root in host.parents or host == agents_root:
             own = agent_private_dir(agent_id).resolve()
             if not (host == own or own in host.parents or host.is_relative_to(own)):
-                # listing agents/ itself is denied for cross-access
                 if host != own and not str(host).startswith(str(own)):
                     raise PermissionError("Private agent cross-access denied")
 

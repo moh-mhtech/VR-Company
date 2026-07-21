@@ -16,20 +16,30 @@ python -m venv .venv
 pip install -r requirements.txt
 pip install -e .
 Copy-Item .env.example .env   # then set OPENAI_API_KEY
-python -m runtime.main        # terminal A
-python -m interfaces.board_cli  # terminal B
+python -m runtime.main experiment create my-run --start
+python -m runtime.main --experiment my-run   # terminal A
+python -m interfaces.board_cli               # terminal B
 ```
+
+Optional live web console (does not replace the runtime or CLIs):
+
+```powershell
+pip install -e ".[web]"
+python -m runtime.main --experiment my-run   # supervisor: AutoGen worker + web at http://127.0.0.1:8787
+python -m runtime.main --no-web              # AutoGen worker only (uses experiments/.active)
+```
+
+`python -m runtime.autogen_server --experiment my-run` runs the simulation worker alone. `python -m web.main` still works as a standalone console against an existing worker.
 
 ## Layout
 
 ```text
-runtime/           Immutable experimental environment (orchestration)
-interfaces/        board_cli.py, client_cli.py
-company/           Mutable virtual company (docs, prompts, agents, accounting)
-shared/            Shared projects, decisions, deliverables
-agents/<id>/       Private persistent memory per agent
-runtime-data/      Conversations, raw usage logs, runtime state
-tests/             Offline smoke tests
+runtime/              Supervisor + AutoGen worker + immutable orchestration
+seed/                 Immutable experiment template (company, agents, shared)
+experiments/<name>/   Mutable per-run copy (gitignored)
+interfaces/           board_cli.py, client_cli.py, runtime TCP client
+web/                  FastAPI console (live feed + experiments menu)
+tests/                Offline smoke tests
 ```
 
 ## License
